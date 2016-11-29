@@ -26,6 +26,7 @@ var endpointProvided = ['install', 'i', 'uninstall', 'rm', 'unlink', 'update']
 
 var shrinkwrapFile = path.join(process.cwd(), 'bower-shrinkwrap.json');
 
+// Create Shrink Wrap
 var shrinkwrap = {};
 if (!noShrinkwrap && !resetShrinkwrap) {
   try {
@@ -39,6 +40,7 @@ if (!noShrinkwrap && !resetShrinkwrap) {
   }
 }
 
+// is this a strict install?
 if (!strictShrinkwrap) {
   try {
     var rc = JSON.parse(fs.readFileSync(path.join(process.cwd(), '.bowerrc'),
@@ -78,33 +80,67 @@ function logFetch(endpoint, qualifier) {
 
 module.exports = function resolver(bower) {
   return {
+
+    // what are we handling?
     match: function (source) {
-      return !!~source.indexOf('://');
+
+      // analyse the source
+      var sshOrURL = /(:\/\/|@)/.test(source),
+          hash = source.split('#')[1] || null,
+          hashIsSemVerOrNull = !hash || /^[0-9\.>=~\^]$/.test(hash);
+
+      // pluggable resolvers can't handle branch or commit references
+      // bower compares the version prop from the releases array to the hash ref
+      //
+      // -> git@host.com:ns/repo.git#branch-name
+      // -> i.e branch-name >= branch-name doesn't work
+      //
+      // -> git@host.com:ns/repo.git
+      // -> there is a workaround for the default branch (incorrectly assumed to be master)
+      // -> where the null hash is compared to 0.0.0 which seems to work
+      return sshOrURL && hashIsSemVerOrNull;
     },
+
+    locate: function (source) {
+      return source;
+    },
+
     /**
      * NOTE: this method is not going to be invoked unless "target" is a valid
      * semver range.
      */
     releases: function (source) {
+
       var rc = releaseCache[source] = {};
       var sw = shrinkwrap[source];
+
       logRelease(source);
+
       if (sw && !endpointProvided) {
+
         // skipping normal refs resolution in favour of shrinkwrap entry
         return Object.keys(sw).map(function (ver) {
           rc[ver] = sw[ver];
-          return ver === 'master' ? {target: 'master', version: '0.0.0'}
+          return ver === 'master'
+            ? {target: 'master', version: '0.0.0'}
             // target: using ver instead of hash to get readbale bower output
             : {target: ver, version: ver};
         });
       }
+
       if (strictShrinkwrap) {
         throw new Error(source + ' is missing shrinkwrap entry');
       }
+
       var src = !source.indexOf('git+') ? source.slice(4) : source;
+
       return GitRemoteResolver.refs(src).then(function (refs) {
+
         var r = [];
+
         refs.forEach(function (line) {
+
+          // tags
           var match = line.match(/^([a-f0-9]{40})\s+refs\/tags\/v?(\S+)/);
           if (match && !match[2].endsWith('^{}')) {
             var ver = match[2];
@@ -115,59 +151,96 @@ module.exports = function resolver(bower) {
             // target: using ver instead of hash to get readbale bower output
             r.push({target: ver, version: ver});
           }
+
+          // branches - currently doesn't work due to how bower does version comparisons
+          //
+          // i.e. for git@host.com:ns/repo.git#branch-name
+          // bower assumes `branch-name` is a semver constraint and fails to find a matching version
+          //
+          // match = line.match(/^([a-f0-9]{40})\s+refs\/heads\/(.+)/);
+          // if (match && match[2]) {
+          //
+          //   var branch = match[2],
+          //       hash = match[1];
+          //
+          //   rc[branch] = hash;
+          //
+          //   r.push({target: branch, version: branch});
+          //
+          // }
+
         });
+
         if (!r.length) {
           // used in case of wildcard range for repos with no tags
           r.push({target: 'master', version: '0.0.0'});
         }
+
         return r;
       });
     },
+
     fetch: function (endpoint, cached) {
+
       var lock = updatedShrinkwrap[endpoint.source] ||
         (updatedShrinkwrap[endpoint.source] = {});
+
       if (cached && cached.version) {
+
         var lockedVersion = cached.version;
         var lockedHash = cached.endpoint.target;
+
         if (cached.resolution.commit) {
           lockedVersion === '0.0.0' && (lockedVersion = cached.endpoint.target);
           lockedHash = cached.resolution.commit;
         }
+
         if (lockedVersion !== '0.0.0' || lockedHash !== 'master') {
           lock[lockedVersion] = lockedHash;
           return;
         }
       }
+
       var options = assign({}, bower, {
         config: assign({}, bower.config, {resolvers: []})
       });
+
       // (sha1, tag/branch)
       // can be undefined if depedency was specified using url#tag/branch syntax
       var rc = releaseCache[endpoint.source];
       var sw = shrinkwrap[endpoint.source];
+
       if (sw && !endpointProvided) {
+
         var hash = sw[endpoint.target];
+
         if (hash) {
           rc = {};
           rc[endpoint.target] = hash;
         }
       }
+
       if (rc && rc[endpoint.target]) {
         var originalTarget = endpoint.target;
         lock[endpoint.target] = rc[endpoint.target];
         endpoint.target = rc[endpoint.target];
         logFetch(endpoint, originalTarget);
         return _();
-      } else {
+      }
+
+      else {
+
         if (strictShrinkwrap) {
           throw new Error(endpoint.source +
             ' is missing shrinkwrap entry for ' + endpoint.target);
         }
+
         // at this point endpoint.target can point to either a branch or a
         // commit hash (and so we'll try to resolve branch name & update
         // the lock)
         var src = !endpoint.source.indexOf('git+') ? endpoint.source.slice(4)
           : endpoint.source;
+
         return GitRemoteResolver.refs(src)
           .then(function (refs) {
             var r = {};
@@ -194,6 +267,7 @@ module.exports = function resolver(bower) {
           })
           .then(_);
       }
+
       function _() {
         // todo: switch tp PackageRepository
         return createInstance(endpoint, options, null)
